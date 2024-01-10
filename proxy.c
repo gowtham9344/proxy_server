@@ -1,239 +1,372 @@
+#include <string.h>  
+#include <unistd.h>
+#include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
-#include <string.h>
-#include <arpa/inet.h>
+#include <errno.h>
 #include <netinet/in.h>
+#include <sys/types.h> 
 #include <sys/socket.h>
-#include <sys/types.h>
 #include <sys/wait.h>
+#include <arpa/inet.h>
+#include <signal.h>
+#include <netdb.h>
+#include <stdlib.h>
+#include <ctype.h>
+#include <time.h> 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
-#include <poll.h>
 
-#define PROXY_PORT 8082
+#define SA struct sockaddr 
+#define BACKLOG 10 
+#define PORT "8080"
 
-// SSL context for the proxy server
-SSL_CTX *ssl_ctx;
+SSL_CTX* ctx;
+SSL_CTX* ctx1;
+
+//it helps us to handle all the dead process which was created with the fork system call.
+void sigchld_handler(int s){
+	int saved_errno = errno;
+	while(waitpid(-1,NULL,WNOHANG) > 0);
+	errno = saved_errno;
+}
+
+// give IPV4 or IPV6  based on the family set in the sa
+void *get_in_addr(struct sockaddr *sa){
+	if(sa->sa_family == AF_INET){
+		return &(((struct sockaddr_in*)sa)->sin_addr);	
+	}
+	return &(((struct sockaddr_in6*)sa)->sin6_addr);
+}
+
+
+void create_SSL_context() {
+
+    // Initialize OpenSSL
+    SSL_library_init();
+    OpenSSL_add_all_algorithms();
+    SSL_load_error_strings();
+
+    // Create a new SSL context
+    ctx = SSL_CTX_new(SSLv23_server_method());
+    if (ctx == NULL) {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+
+    // Load the server certificate and private key
+    if (SSL_CTX_use_certificate_file(ctx, "server.crt", SSL_FILETYPE_PEM) <= 0) {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+
+    if (SSL_CTX_use_PrivateKey_file(ctx, "server.key", SSL_FILETYPE_PEM) <= 0) {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+}
+
+void create_SSL_context_client() {
+
+    // Initialize OpenSSL
+    SSL_library_init();
+    SSL_load_error_strings();
+
+    // Create a new SSL context
+    ctx1 = SSL_CTX_new(SSLv23_client_method());
+    if (ctx1 == NULL) {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+}
+
 
 void cleanup(SSL *ssl, int client_socket) {
     SSL_free(ssl);
     close(client_socket);
 }
 
-void get_data(SSL* sslc,SSL* ssld){
-	char buffer[65525];
-	int bytes = 0;
-	memset(buffer,'\0',sizeof(buffer));
-	bytes = SSL_read(sslc , buffer,sizeof(buffer));
+// this is the code for server creation. here i have used TCP instead of UDP because i need all the data without any loss. if we use UDP we
+// have to implement those in the upper layers.
+// this function will return socket descripter to the calling function.
+int server_creation(){
+	int sockfd;
+	struct addrinfo hints,*servinfo,*p;
+	int yes = 1;
+	int rv;
+	memset(&hints,0,sizeof(hints));
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_flags = AI_PASSIVE;// my ip
 	
-	if(bytes > 0){
-		SSL_write(ssld,buffer,sizeof(buffer));
-		printf("%s" , buffer);
+	// set the address of the server with the port info.
+	if((rv = getaddrinfo(NULL,PORT,&hints,&servinfo)) != 0){
+		fprintf(stderr, "getaddrinfo: %s\n",gai_strerror(rv));	
+		return 1;
+	}
+	
+	// loop through all the results and bind to the socket in the first we can
+	for(p = servinfo; p!= NULL; p=p->ai_next){
+		sockfd=socket(p->ai_family,p->ai_socktype,p->ai_protocol);
+		if(sockfd==-1){ 
+			perror("server: socket\n"); 
+			continue; 
+		} 
+		
+		// SO_REUSEADDR is used to reuse the same port even if it was already created by this.
+		// this is needed when the program is closed due to some system errors then socket will be closed automaticlly after few
+		// minutes in that case before the socket is closed if we rerun the program then we have use the already used port 	
+		if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1){
+			perror("setsockopt");
+			exit(1);	
+		}
+		
+		// it will help us to bind to the port.
+		if (bind(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
+			close(sockfd);
+			perror("server: bind");
+			continue;
+		}
+		break;
+	}
+
+	if(p == NULL){
+		fprintf(stderr, "server: failed to bind\n");
+		exit(1);	
+	}
+	
+
+	// server will be listening with maximum simultaneos connections of BACKLOG
+	if(listen(sockfd,BACKLOG) == -1){ 
+		perror("listen");
+		exit(1); 
+	} 
+	return sockfd;
+}
+
+
+//connection establishment with the client
+//return connection descriptor to the calling function
+int connection_accepting(int sockfd){
+	int connfd;
+	struct sockaddr_storage their_addr;
+	char s[INET6_ADDRSTRLEN];
+	socklen_t sin_size;
+	
+	sin_size = sizeof(their_addr); 
+	connfd=accept(sockfd,(SA*)&their_addr,&sin_size); 
+	if(connfd == -1){ 
+		perror("\naccept error\n");
+		return -1;
+	} 
+	//printing the client name
+	inet_ntop(their_addr.ss_family,get_in_addr((struct sockaddr *)&their_addr),s, sizeof(s));
+	printf("\nserver: got connection from %s\n", s);
+	
+	return connfd;
+}
+
+// reap all dead processes that are created as child processes
+void signal_handler(){
+	struct sigaction sa;
+	sa.sa_handler = sigchld_handler; 
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = SA_RESTART;
+	if (sigaction(SIGCHLD, &sa, NULL) == -1) {
+		perror("sigaction");
+		exit(1);
 	}
 }
 
-void* runsocket(SSL* sslc,SSL* ssld){
-	while(1){
-		get_data(sslc,ssld);
-		fflush(stdout);
-		get_data(ssld,sslc);
-		fflush(stdout);
+// this is the code for client creation. here i have used TCP instead of UDP because i need all the data without any loss. if we use UDP we
+// have to implement those in the upper layers.
+// this function will return socket descripter to the calling function.
+int client_creation(char* port,char* destination_server_addr){
+	int sockfd;
+	struct addrinfo hints,*servinfo,*p;
+	char s[INET6_ADDRSTRLEN];
+	int rv;
+
+	memset(&hints,0,sizeof(hints));
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+
+	if((rv = getaddrinfo(destination_server_addr,port,&hints,&servinfo)) != 0){
+		fprintf(stderr, "getaddrinfo: %s\n",gai_strerror(rv));	
+		return -1;
 	}
-	return NULL;
+
+	for(p = servinfo; p!= NULL; p=p->ai_next){
+		sockfd=socket(p->ai_family,p->ai_socktype,p->ai_protocol);
+		if(sockfd==-1){ 
+			perror("client: socket\n"); 
+			continue; 
+		}
+		
+		// connect will help us to connect to the server with the addr given in arguments.
+		if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
+			close(sockfd);
+			perror("client: connect");
+			continue;
+		} 
+		break;
+	}
+
+	if(p == NULL){
+		fprintf(stderr, "client: failed to connect\n");
+		return -1;	
+	}
+	
+	//printing ip address of the server.
+	inet_ntop(p->ai_family, get_in_addr((struct sockaddr *)p->ai_addr),s, sizeof(s));
+	printf("proxy client: connecting to %s\n", s);
+	freeaddrinfo(servinfo);
+	
+	return sockfd;
 }
 
-void handle_client(int client_socket) {
-    // SSL setup
-    SSL *ssl = SSL_new(ssl_ctx);
-    if (!ssl) {
-        perror("SSL_new");
-        close(client_socket);
-        exit(EXIT_FAILURE);
-    }
+void message_handler(SSL* client_ssl,SSL* destination_ssl,int client_socket,int destination_socket){
+	    // Forward the data between client and destination using SSL 
+	char data_buffer[2048];
+	ssize_t n;
 
-    SSL_set_fd(ssl, client_socket);
-    if (SSL_accept(ssl) <= 0) {
-        perror("SSL_accept");
-        cleanup(ssl, client_socket);
-        exit(EXIT_FAILURE);
-    }
-
-    // Receive the client's request
-    char buffer[4096];
-    ssize_t bytes_received = SSL_read(ssl, buffer, sizeof(buffer));
-
-    if (bytes_received <= 0) {
-        ERR_print_errors_fp(stderr);
-        cleanup(ssl, client_socket);
-        exit(EXIT_FAILURE);
-    }
-
-    // Extract the method and host from the request
-    char method[16];
-    char host[256];
-    sscanf(buffer, "%s %s", method, host);
-
-    if (strcmp(method, "CONNECT") == 0) {
-        // Handling CONNECT method
-        char *port_str = strchr(host, ':');
-        if (port_str != NULL) {
-            *port_str = '\0';
-            int port = atoi(port_str + 1);
-
-            // Create a socket to connect to the destination server
-            int destination_socket = socket(AF_INET, SOCK_STREAM, 0);
-            if (destination_socket == -1) {
-                perror("socket");
-                cleanup(ssl, client_socket);
-                exit(EXIT_FAILURE);
-            }
-
-            // Set up the address structure for the destination server
-            struct sockaddr_in destination_addr;
-            memset(&destination_addr, 0, sizeof(destination_addr));
-            destination_addr.sin_family = AF_INET;
-            destination_addr.sin_port = htons(port);
-            inet_pton(AF_INET, host, &destination_addr.sin_addr);
-
-            // Connect to the destination server
-            if (connect(destination_socket, (struct sockaddr *)&destination_addr, sizeof(destination_addr)) == -1) {
-                perror("connect");
-                cleanup(ssl, client_socket);
-                close(destination_socket);
-                exit(EXIT_FAILURE);
-            }
-
-            // Notify the client that the connection is established
-            const char *response = "HTTP/1.1 200 Connection established\r\n\r\n";
-            SSL_write(ssl, response, strlen(response));
-
-            // Set up SSL for the destination server
-            SSL *destination_ssl = SSL_new(ssl_ctx);
-            if (!destination_ssl) {
-                perror("SSL_new");
-                cleanup(ssl, client_socket);
-                close(destination_socket);
-                exit(EXIT_FAILURE);
-            }
-
-            SSL_set_fd(destination_ssl, destination_socket);
-            if (SSL_accept(destination_ssl) <= 0) {
-                perror("SSL_accept");
-                cleanup(ssl, client_socket);
-                close(destination_socket);
-                exit(EXIT_FAILURE);
-            }
-
-           // Forward the data between client and destination using SSL
-
-            char data_buffer[4096];
-            ssize_t n;
-            
-
-            while(1)
-            	runsocket(ssl,destination_ssl);
-
-            // Clean up
-            SSL_free(destination_ssl);
-            close(destination_socket);
-        }
-    }
-
-    // For other methods or non-CONNECT requests, handle accordingly
-    // (e.g., forward the request to the destination server)
-
-    // This example doesn't handle other methods, so it closes the client socket
-    cleanup(ssl, client_socket);
-    exit(EXIT_SUCCESS);
+	while (1) {
+		
+		n = SSL_read(client_ssl, data_buffer, sizeof(data_buffer));
+		if (n <= 0) {
+		    break;
+		}
+		data_buffer[n]='\0';
+		SSL_write(destination_ssl, data_buffer, n);
+		
+		n = SSL_read(destination_ssl, data_buffer, sizeof(data_buffer));
+		if (n <= 0) {
+		    break;
+		}
+		data_buffer[n]='\0';
+		SSL_write(client_ssl, data_buffer, n);
+	}
 }
 
 
-void sigchld_handler(int s) {
-    (void)s;
-    while (waitpid(-1, NULL, WNOHANG) > 0);
+
+//simple webserver with support to http methods such as get as well as post (basic functionalities)
+void proxy_server_handler(SSL* ssl,int connfd){
+	int c = 0;
+	char buff[1024];
+
+	// receiving the message from the client either get request or post request
+	c = SSL_read(ssl, buff, sizeof(buff));
+	
+	if (c <= 0) {
+		ERR_print_errors_fp(stderr);
+		cleanup(ssl, connfd);
+		exit(EXIT_FAILURE);
+    	}
+
+	buff[c] = '\0';
+
+	printf("%s",buff);
+	
+	
+	// Extract the method and host from the request
+    	char method[16];
+    	char host[256];
+    	sscanf(buff, "%s %s", method, host);
+    	
+    	 if (strcmp(method, "CONNECT") == 0) {
+		// Handling CONNECT method
+		char *port_str = strchr(host, ':');
+		if (port_str != NULL) {
+		    *port_str = '\0';
+		    char* port = port_str + 1;
+		    int destination_sockfd = client_creation(port,host);
+		    
+		    if(destination_sockfd == -1){
+		    	perror("socket");
+		        cleanup(ssl, connfd);
+		        exit(EXIT_FAILURE);
+		    }
+		    
+		    // Notify the client that the connection is established
+		    const char *response = "HTTP/1.1 200 Connection established\r\n\r\n";
+		    SSL_write(ssl, response, strlen(response));
+		    
+		    // Create an SSL connection object
+		    SSL *destination_ssl = SSL_new(ctx1);
+
+		    // Attach the SSL connection object to the socket file descriptor
+		    SSL_set_fd(destination_ssl, destination_sockfd);
+
+		    // Initiate SSL handshake
+		    if (SSL_connect(destination_ssl) == -1) {
+			ERR_print_errors_fp(stderr);
+			cleanup(ssl, connfd);
+			exit(EXIT_FAILURE);
+		    }
+		    
+
+		    message_handler(ssl,destination_ssl,connfd,destination_sockfd);
+
+		    // Clean up
+		    SSL_free(destination_ssl);
+		    close(destination_sockfd);
+		}
+	}
 }
 
-int main() {
-    int proxy_socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (proxy_socket == -1) {
-        perror("socket");
-        exit(EXIT_FAILURE);
-    }
 
-    // Initialize SSL
-    SSL_library_init();
-    SSL_load_error_strings();
-    ssl_ctx = SSL_CTX_new(SSLv23_server_method());
-    if (!ssl_ctx) {
-        perror("SSL_CTX_new");
-        close(proxy_socket);
-        exit(EXIT_FAILURE);
-    }
 
-    // Load certificate and private key (replace with your own)
-    if (SSL_CTX_use_certificate_file(ssl_ctx, "server.crt", SSL_FILETYPE_PEM) <= 0 ||
-        SSL_CTX_use_PrivateKey_file(ssl_ctx, "server.key", SSL_FILETYPE_PEM) <= 0) {
-        ERR_print_errors_fp(stderr);
-        SSL_CTX_free(ssl_ctx);
-        close(proxy_socket);
-        exit(EXIT_FAILURE);
-    }
 
-    struct sockaddr_in proxy_addr;
-    memset(&proxy_addr, 0, sizeof(proxy_addr));
-    proxy_addr.sin_family = AF_INET;
-    proxy_addr.sin_port = htons(PROXY_PORT);
-    proxy_addr.sin_addr.s_addr = INADDR_ANY;
+int main(){ 
+	int sockfd,connfd;
+	//create SSL context
+	create_SSL_context();
+ 	create_SSL_context_client();
+	
+	//server creation .
+	sockfd = server_creation();
+	
+	signal_handler();	
 
-    if (bind(proxy_socket, (struct sockaddr *)&proxy_addr, sizeof(proxy_addr)) == -1) {
-        perror("bind");
-        close(proxy_socket);
-        SSL_CTX_free(ssl_ctx);
-        exit(EXIT_FAILURE);
-    }
+	printf("server: waiting for connections...\n");
+	 
+	while(1){ 
 
-    if (listen(proxy_socket, 10) == -1) {
-        perror("listen");
-        close(proxy_socket);
-        SSL_CTX_free(ssl_ctx);
-        exit(EXIT_FAILURE);
-    }
+		connfd = connection_accepting(sockfd);
+			
+		if(connfd == -1){
+			break;
+		}
 
-    // Set up a signal handler to reap zombie processes
-    struct sigaction sa;
-    sa.sa_handler = sigchld_handler;
-    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
-    sigaction(SIGCHLD, &sa, NULL);
+		// fork is used for concurrent server.
+		// here fork is used to create child process to handle single client connection because if two clients needs to 
+		// connect to the server simultaneously if we do the client acceptence without fork if some client got connected then until 
+		// the client releases the server no one can able to connect to the server.
+		// to avoid this , used fork, that creates child process to handle the connection.
+  
+		int fk=fork(); 
+		if (fk==0){ 
+			close(sockfd);
+			// Create an SSL connection
+			SSL* ssl = SSL_new(ctx);
+			SSL_set_fd(ssl, connfd);
+			 // Perform SSL handshake
+			if (SSL_accept(ssl) <= 0) {
+			    ERR_print_errors_fp(stderr);
+			    close(connfd);
+			    continue;
+			}
+			proxy_server_handler(ssl,connfd);
+			SSL_shutdown(ssl);
+        		SSL_free(ssl);
+		} 
+		close(connfd);  
+	} 
+	SSL_CTX_free(ctx);
+	close(sockfd); 
+	return 0;
+} 
 
-    printf("Proxy server is running on port %d\n", PROXY_PORT);
 
-    while (1) {
-        int client_socket = accept(proxy_socket, NULL, NULL);
-        if (client_socket == -1) {
-            perror("accept");
-            continue;
-        }
-
-        pid_t pid = fork();
-        if (pid == -1) {
-            perror("fork");
-            close(client_socket);
-            continue;
-        } else if (pid == 0) {
-            // In the child process (handle the client request)
-            close(proxy_socket);
-            handle_client(client_socket);
-        } else {
-            // In the parent process (continue accepting new connections)
-            close(client_socket);
-        }
-    }
-
-    // Clean up
-    close(proxy_socket);
-    SSL_CTX_free(ssl_ctx);
-
-    return 0;
-}
 

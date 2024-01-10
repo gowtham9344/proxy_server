@@ -79,7 +79,8 @@ void send_css(SSL* ssl,char fileName[100]){
 void send_response(SSL* ssl,const char* status, const char* content_type,const char* content){
 	char response[2048]; 
 	sprintf(response, "HTTP/1.1 %s\r\nContent-Type: %s\r\n\r\n%s", status, content_type, content);
-	SSL_write(ssl, response, strlen(response));
+	
+	printf("%d",SSL_write(ssl, response, strlen(response)));
 }
 
 // handle saving of data into the file 
@@ -363,7 +364,7 @@ void routing(char route[],char method[],SSL* ssl,char queryData[],char fileName[
 //simple webserver with support to http methods such as get as well as post (basic functionalities)
 void simple_webserver(SSL* ssl,int connfd){
 	int c = 0;
-	char buff[1024];
+	char buff[2048];
 	char method[10];// to store the method name
 	// default route to be parsed
 	char fileName[100] = "output.txt";
@@ -380,7 +381,8 @@ void simple_webserver(SSL* ssl,int connfd){
 
 	printf("%s",buff);
 	sscanf(buff, "%s /%s", method,route);
-		
+	printf("%s",method);
+	printf("%s",route);
 
 	// Different path other than default
 	if(strcmp(route,"HTTP/1.1")){
@@ -417,9 +419,6 @@ void simple_webserver(SSL* ssl,int connfd){
 	}
 	
 	routing(route,method,ssl,queryData,fileName,buff,query);
-	
-	close(connfd); 
-	exit(0);
 }
 
 
@@ -463,9 +462,13 @@ int main(){
 			    close(connfd);
 			    continue;
 			}
-			simple_webserver(ssl,connfd);
+			while(1){
+				simple_webserver(ssl,connfd);
+			}
+			close(connfd);
 			SSL_shutdown(ssl);
         		SSL_free(ssl);
+        		exit(0);
 		} 
 		close(connfd);  
 	} 

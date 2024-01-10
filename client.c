@@ -18,7 +18,7 @@
 #include <openssl/err.h>
 
 #define PROXY_HOST "127.0.0.1" // Replace with your proxy host
-#define PROXY_PORT "8082"               // Replace with your proxy port
+#define PROXY_PORT "8080"               // Replace with your proxy port
 #define TARGET_HOST "127.0.0.1"       // Replace with your target host
 #define TARGET_PORT "8050"               // Replace with your target port for HTTPS
 
@@ -95,7 +95,7 @@ int client_creation() {
 }
 
 void send_request(SSL *ssl, char *host, char *fileName, char *body, int isConnect) {
-    char request[1024];
+    char request[2048];
 
     if (isConnect) {
         sprintf(request, "CONNECT %s:%s HTTP/1.1\r\nHost: %s\r\n\r\n", TARGET_HOST, TARGET_PORT, TARGET_HOST);
