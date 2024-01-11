@@ -80,7 +80,7 @@ void send_response(SSL* ssl,const char* status, const char* content_type,const c
 	char response[2048]; 
 	sprintf(response, "HTTP/1.1 %s\r\nContent-Type: %s\r\n\r\n%s", status, content_type, content);
 	
-	printf("%d",SSL_write(ssl, response, strlen(response)));
+	SSL_write(ssl, response, strlen(response));
 }
 
 // handle saving of data into the file 
@@ -222,6 +222,14 @@ void *get_in_addr(struct sockaddr *sa){
 	return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
 
+// give PORT  based on the family set in the sa
+int get_in_port(struct sockaddr *sa){
+	if(sa->sa_family == AF_INET){
+		return (((struct sockaddr_in*)sa)->sin_port);	
+	}
+	return (((struct sockaddr_in6*)sa)->sin6_port);
+}
+
 // this is the code for server creation. here i have used TCP instead of UDP because i need all the data without any loss. if we use UDP we
 // have to implement those in the upper layers.
 // this function will return socket descripter to the calling function.
@@ -296,6 +304,13 @@ int connection_accepting(int sockfd){
 	} 
 	//printing the client name
 	inet_ntop(their_addr.ss_family,get_in_addr((struct sockaddr *)&their_addr),s, sizeof(s));
+	
+	//block connections other than proxy
+	printf("%d\n", ntohs(get_in_port((struct sockaddr *)&their_addr)));
+	if(strcmp("127.0.0.1",s) != 0 || ntohs(get_in_port((struct sockaddr *)&their_addr)) != 8070){
+		close(connfd);
+		return -1;
+	}
 	printf("\nserver: got connection from %s\n", s);
 	
 	return connfd;
@@ -379,10 +394,7 @@ void simple_webserver(SSL* ssl,int connfd){
 	}
 	buff[c] = '\0';
 
-	printf("%s",buff);
 	sscanf(buff, "%s /%s", method,route);
-	printf("%s",method);
-	printf("%s",route);
 
 	// Different path other than default
 	if(strcmp(route,"HTTP/1.1")){
@@ -441,7 +453,7 @@ int main(){
 		connfd = connection_accepting(sockfd);
 			
 		if(connfd == -1){
-			break;
+			continue;
 		}
 
 		// fork is used for concurrent server.

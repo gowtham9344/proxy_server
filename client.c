@@ -94,6 +94,7 @@ int client_creation() {
     return sockfd;
 }
 
+
 void send_request(SSL *ssl, char *host, char *fileName, char *body, int isConnect) {
     char request[2048];
 

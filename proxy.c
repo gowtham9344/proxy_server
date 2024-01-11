@@ -190,17 +190,38 @@ int client_creation(char* port,char* destination_server_addr){
 	memset(&hints,0,sizeof(hints));
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
+	
 
 	if((rv = getaddrinfo(destination_server_addr,port,&hints,&servinfo)) != 0){
 		fprintf(stderr, "getaddrinfo: %s\n",gai_strerror(rv));	
 		return -1;
 	}
+	
+	struct sockaddr_in proxy_addr;
+	memset(&proxy_addr,0,sizeof(proxy_addr));
+	proxy_addr.sin_family = AF_INET;
+	proxy_addr.sin_port = htons(8070);
+	proxy_addr.sin_addr.s_addr = INADDR_ANY;
 
 	for(p = servinfo; p!= NULL; p=p->ai_next){
 		sockfd=socket(p->ai_family,p->ai_socktype,p->ai_protocol);
 		if(sockfd==-1){ 
 			perror("client: socket\n"); 
 			continue; 
+		}
+		
+		int yes = 1;
+		
+		if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1){
+			perror("setsockopt");
+			exit(1);	
+		}
+		
+		// it will help us to bind to the port.
+		if (bind(sockfd, (SA*) &proxy_addr,sizeof(proxy_addr) ) == -1) {
+			close(sockfd);
+			perror("server: bind");
+			continue;
 		}
 		
 		// connect will help us to connect to the server with the addr given in arguments.
@@ -266,7 +287,6 @@ void proxy_server_handler(SSL* ssl,int connfd){
 
 	buff[c] = '\0';
 
-	printf("%s",buff);
 	
 	
 	// Extract the method and host from the request
