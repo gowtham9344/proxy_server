@@ -2,7 +2,6 @@
 #include <unistd.h>
 #include <netdb.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <errno.h>
 #include <netinet/in.h>
 #include <sys/types.h> 

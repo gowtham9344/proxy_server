@@ -11,7 +11,6 @@
 #include <arpa/inet.h>
 #include <signal.h>
 #include <netdb.h>
-#include <stdlib.h>
 #include <ctype.h>
 #include <time.h> 
 #include <openssl/ssl.h>

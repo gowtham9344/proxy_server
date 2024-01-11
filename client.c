@@ -2,7 +2,6 @@
 #include <unistd.h>
 #include <netdb.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <errno.h>
 #include <netinet/in.h>
 #include <sys/types.h> 
@@ -17,10 +16,10 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
-#define PROXY_HOST "127.0.0.1" // Replace with your proxy host
-#define PROXY_PORT "8080"               // Replace with your proxy port
-#define TARGET_HOST "127.0.0.1"       // Replace with your target host
-#define TARGET_PORT "8050"               // Replace with your target port for HTTPS
+#define PROXY_HOST "127.0.0.1" 
+#define PROXY_PORT "8080"     
+#define TARGET_HOST "127.0.0.1" 
+#define TARGET_PORT "8050"  
 
 // give IPV4 or IPV6  based on the family set in the sa
 void *get_in_addr(struct sockaddr *sa){
