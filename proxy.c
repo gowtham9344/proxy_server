@@ -13,22 +13,17 @@
 #include <netdb.h>
 #include <ctype.h>
 #include <time.h> 
+#include <poll.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
 #define SA struct sockaddr 
 #define BACKLOG 10 
 #define PORT "8080"
+#define NUM_FDS 2
 
 SSL_CTX* ctx;
 SSL_CTX* ctx1;
-
-//it helps us to handle all the dead process which was created with the fork system call.
-void sigchld_handler(int s){
-	int saved_errno = errno;
-	while(waitpid(-1,NULL,WNOHANG) > 0);
-	errno = saved_errno;
-}
 
 // give IPV4 or IPV6  based on the family set in the sa
 void *get_in_addr(struct sockaddr *sa){
@@ -80,9 +75,10 @@ void create_SSL_context_client() {
 }
 
 
-void cleanup(SSL *ssl, int client_socket) {
+void cleanup(SSL *ssl,struct pollfd* pollfds) {
     SSL_free(ssl);
-    close(client_socket);
+    close(pollfds->fd);
+    pollfds->fd *= -1;
 }
 
 // this is the code for server creation. here i have used TCP instead of UDP because i need all the data without any loss. if we use UDP we
@@ -126,15 +122,8 @@ int server_creation(){
 			perror("server: bind");
 			continue;
 		}
-		break;
-	}
-
-	if(p == NULL){
-		fprintf(stderr, "server: failed to bind\n");
-		exit(1);	
 	}
 	
-
 	// server will be listening with maximum simultaneos connections of BACKLOG
 	if(listen(sockfd,BACKLOG) == -1){ 
 		perror("listen");
@@ -144,37 +133,53 @@ int server_creation(){
 }
 
 
-//connection establishment with the client
-//return connection descriptor to the calling function
-int connection_accepting(int sockfd){
-	int connfd;
-	struct sockaddr_storage their_addr;
-	char s[INET6_ADDRSTRLEN];
-	socklen_t sin_size;
-	
-	sin_size = sizeof(their_addr); 
-	connfd=accept(sockfd,(SA*)&their_addr,&sin_size); 
-	if(connfd == -1){ 
-		perror("\naccept error\n");
-		return -1;
-	} 
-	//printing the client name
-	inet_ntop(their_addr.ss_family,get_in_addr((struct sockaddr *)&their_addr),s, sizeof(s));
-	printf("\nserver: got connection from %s\n", s);
-	
-	return connfd;
-}
+void connection_accepting(int sockfd, struct pollfd **pollfds, int *maxfds, int *numfds, SSL*** sslfds, SSL_CTX* ctx) {
+    int connfd;
+    struct sockaddr_storage their_addr;
+    char s[INET6_ADDRSTRLEN];
+    socklen_t sin_size;
 
-// reap all dead processes that are created as child processes
-void signal_handler(){
-	struct sigaction sa;
-	sa.sa_handler = sigchld_handler; 
-	sigemptyset(&sa.sa_mask);
-	sa.sa_flags = SA_RESTART;
-	if (sigaction(SIGCHLD, &sa, NULL) == -1) {
-		perror("sigaction");
-		exit(1);
-	}
+    sin_size = sizeof(their_addr);
+    connfd = accept(sockfd, (SA*)&their_addr, &sin_size);
+    if (connfd == -1) {
+        perror("accept");
+        exit(1);
+    }
+
+    if (*numfds == *maxfds) {
+        *pollfds = realloc(*pollfds, (*maxfds + NUM_FDS) * sizeof(struct pollfd));
+        *sslfds = realloc(*sslfds, (*maxfds + NUM_FDS) * sizeof(SSL*));
+
+        if (*pollfds == NULL || *sslfds == NULL) {
+            perror("realloc");
+            exit(1);
+        }
+
+        *maxfds += NUM_FDS;
+    }
+    (*numfds)++;
+
+    ((*pollfds) + *numfds - 1)->fd = connfd;
+    ((*pollfds) + *numfds - 1)->events = POLLIN;
+    ((*pollfds) + *numfds - 1)->revents = 0;
+
+    // Create a new SSL connection
+    SSL* ssl = SSL_new(ctx);
+    SSL_set_fd(ssl, connfd);
+
+    // Perform SSL handshake
+    if (SSL_accept(ssl) <= 0) {
+        ERR_print_errors_fp(stderr);
+        close(connfd);
+        exit(1);
+    }
+
+    // Store the SSL structure pointer in the array
+    (*sslfds)[*numfds - 1] = ssl;
+
+    // Printing the client name
+    inet_ntop(their_addr.ss_family, get_in_addr((struct sockaddr *)&their_addr), s, sizeof(s));
+    printf("\nproxy server: got connection from %s\n", s);
 }
 
 // this is the code for client creation. here i have used TCP instead of UDP because i need all the data without any loss. if we use UDP we
@@ -250,28 +255,30 @@ void message_handler(SSL* client_ssl,SSL* destination_ssl,int client_socket,int 
 	char data_buffer[2048];
 	ssize_t n;
 
+	
 	while (1) {
+	
+			n = SSL_read(client_ssl, data_buffer, sizeof(data_buffer));
+			if (n <= 0) {
+			    break;
+			}
+			data_buffer[n]='\0';
+			SSL_write(destination_ssl, data_buffer, n);
+			
+			n = SSL_read(destination_ssl, data_buffer, sizeof(data_buffer));
+			if (n <= 0) {
+			    break;
+			}
+			data_buffer[n]='\0';
+			SSL_write(client_ssl, data_buffer, n);
 		
-		n = SSL_read(client_ssl, data_buffer, sizeof(data_buffer));
-		if (n <= 0) {
-		    break;
-		}
-		data_buffer[n]='\0';
-		SSL_write(destination_ssl, data_buffer, n);
-		
-		n = SSL_read(destination_ssl, data_buffer, sizeof(data_buffer));
-		if (n <= 0) {
-		    break;
-		}
-		data_buffer[n]='\0';
-		SSL_write(client_ssl, data_buffer, n);
 	}
 }
 
 
 
 //simple webserver with support to http methods such as get as well as post (basic functionalities)
-void proxy_server_handler(SSL* ssl,int connfd){
+void proxy_server_handler(SSL* ssl,struct pollfd* pollfds){
 	int c = 0;
 	char buff[1024];
 
@@ -280,13 +287,12 @@ void proxy_server_handler(SSL* ssl,int connfd){
 	
 	if (c <= 0) {
 		ERR_print_errors_fp(stderr);
-		cleanup(ssl, connfd);
+		cleanup(ssl, pollfds);
 		exit(EXIT_FAILURE);
     	}
 
 	buff[c] = '\0';
 
-	
 	
 	// Extract the method and host from the request
     	char method[16];
@@ -303,33 +309,35 @@ void proxy_server_handler(SSL* ssl,int connfd){
 		    
 		    if(destination_sockfd == -1){
 		    	perror("socket");
-		        cleanup(ssl, connfd);
+		        cleanup(ssl, pollfds);
 		        exit(EXIT_FAILURE);
 		    }
 		    
 		    // Notify the client that the connection is established
 		    const char *response = "HTTP/1.1 200 Connection established\r\n\r\n";
+		    
 		    SSL_write(ssl, response, strlen(response));
 		    
 		    // Create an SSL connection object
 		    SSL *destination_ssl = SSL_new(ctx1);
-
+		    
 		    // Attach the SSL connection object to the socket file descriptor
 		    SSL_set_fd(destination_ssl, destination_sockfd);
-
 		    // Initiate SSL handshake
+		    
 		    if (SSL_connect(destination_ssl) == -1) {
 			ERR_print_errors_fp(stderr);
-			cleanup(ssl, connfd);
+			cleanup(ssl, pollfds);
 			exit(EXIT_FAILURE);
 		    }
 		    
-
-		    message_handler(ssl,destination_ssl,connfd,destination_sockfd);
+		    message_handler(ssl,destination_ssl,pollfds->fd,destination_sockfd);
 
 		    // Clean up
 		    SSL_free(destination_ssl);
 		    close(destination_sockfd);
+		    SSL_shutdown(ssl);
+		    cleanup(ssl, pollfds); 
 		}
 	}
 }
@@ -339,6 +347,12 @@ void proxy_server_handler(SSL* ssl,int connfd){
 
 int main(){ 
 	int sockfd,connfd;
+	nfds_t nfds = 0;
+	struct pollfd *pollfds;
+	int maxfds = 0;
+	int numfds = 0;
+	SSL** sslfds;
+	
 	//create SSL context
 	create_SSL_context();
  	create_SSL_context_client();
@@ -346,41 +360,46 @@ int main(){
 	//server creation .
 	sockfd = server_creation();
 	
-	signal_handler();	
+	if((pollfds = malloc(NUM_FDS*sizeof(struct pollfd))) == NULL){
+		perror("malloc");
+		exit(1);
+	}
+	if((sslfds = malloc(NUM_FDS*sizeof(SSL*))) == NULL){
+		perror("malloc");
+		exit(1);
+	}
+	maxfds = NUM_FDS;
+	
+	
+	pollfds -> fd = sockfd;
+	pollfds -> events = POLLIN;
+	pollfds -> revents = 0;
+	numfds = 1;
 
 	printf("server: waiting for connections...\n");
 	 
 	while(1){ 
-
-		connfd = connection_accepting(sockfd);
-			
-		if(connfd == -1){
-			break;
+		
+		nfds = numfds;
+		if(poll(pollfds,nfds,-1) == -1){
+			perror("poll");
+			exit(1);
 		}
-
-		// fork is used for concurrent server.
-		// here fork is used to create child process to handle single client connection because if two clients needs to 
-		// connect to the server simultaneously if we do the client acceptence without fork if some client got connected then until 
-		// the client releases the server no one can able to connect to the server.
-		// to avoid this , used fork, that creates child process to handle the connection.
-  
-		int fk=fork(); 
-		if (fk==0){ 
-			close(sockfd);
-			// Create an SSL connection
-			SSL* ssl = SSL_new(ctx);
-			SSL_set_fd(ssl, connfd);
-			 // Perform SSL handshake
-			if (SSL_accept(ssl) <= 0) {
-			    ERR_print_errors_fp(stderr);
-			    close(connfd);
-			    continue;
+		
+		for(int fd = 0; fd < nfds;fd++){
+			if((pollfds + fd)->fd <= 0)
+				continue;
+			
+			if(((pollfds + fd)->revents & POLLIN) == POLLIN){
+				if((pollfds + fd)->fd == sockfd){
+					connection_accepting(sockfd,&pollfds,&maxfds,&numfds,&sslfds,ctx);
+				}
+				else{
+					proxy_server_handler(sslfds[fd],pollfds+fd);
+				}
 			}
-			proxy_server_handler(ssl,connfd);
-			SSL_shutdown(ssl);
-        		SSL_free(ssl);
-		} 
-		close(connfd);  
+		}		
+		
 	} 
 	SSL_CTX_free(ctx);
 	close(sockfd); 

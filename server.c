@@ -2,6 +2,7 @@
 #include <unistd.h>
 #include <netdb.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <errno.h>
 #include <netinet/in.h>
 #include <sys/types.h> 
@@ -13,16 +14,24 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <time.h> 
+#include <poll.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
 #define SA struct sockaddr 
 #define BACKLOG 10 
 #define PORT "8050"
+#define NUM_FDS 2
 
 int flag = 0;
 
 void send_response(SSL* ssl,const char* status, const char* content_type,const char* content);
+
+void cleanup(SSL *ssl,struct pollfd* pollfds) {
+    SSL_free(ssl);
+    close(pollfds->fd);
+    pollfds->fd *= -1;
+}
 
 SSL_CTX* create_SSL_context() {
     SSL_CTX* ctx;
@@ -78,7 +87,6 @@ void send_css(SSL* ssl,char fileName[100]){
 void send_response(SSL* ssl,const char* status, const char* content_type,const char* content){
 	char response[2048]; 
 	sprintf(response, "HTTP/1.1 %s\r\nContent-Type: %s\r\n\r\n%s", status, content_type, content);
-	
 	SSL_write(ssl, response, strlen(response));
 }
 
@@ -115,7 +123,7 @@ void getalldata(SSL* ssl,char content[1024],char fileName[100]){
 	    char line[100];
 	    int len = 0;
 	    while(fgets(line,100,file)){
-		char line2[100];
+		char line2[110];
 	    	sprintf(line2,"<li>%s</li>",line);
 		strcat(content,line2);
 	    }
@@ -134,7 +142,7 @@ void handle_get_request(SSL* ssl,char fileName[100]) {
 	return;
     
     //create html content for displaying data
-    char html_content[1024];
+    char html_content[1150];
     sprintf(html_content,"<html><head><link rel=\"stylesheet\" href=\"styles.css\"></head><body><ul>%s</ul></body></html>",buff);
   
     send_response(ssl, "200 OK", "text/html", html_content);
@@ -189,7 +197,7 @@ void parse_query_parameters(const char *query_string,char content[1024]) {
 
     // Parse query parameters
     while (sscanf(query_string, "%49[^=]=%49[^&]", parameter, value) == 2) {
-	char line2[100];
+	char line2[101];
 	memset(line2,'\0',sizeof(line2));
 	sprintf(line2,"%s=%s\n",parameter,value);
         len += strlen(line2);
@@ -203,14 +211,6 @@ void parse_query_parameters(const char *query_string,char content[1024]) {
         query_string++; // Skip the '&'
     }
     content[len-1] = '\0';
-}
-
-
-//it helps us to handle all the dead process which was created with the fork system call.
-void sigchld_handler(int s){
-	int saved_errno = errno;
-	while(waitpid(-1,NULL,WNOHANG) > 0);
-	errno = saved_errno;
 }
 
 // give IPV4 or IPV6  based on the family set in the sa
@@ -270,15 +270,8 @@ int server_creation(){
 			perror("server: bind");
 			continue;
 		}
-		break;
-	}
-
-	if(p == NULL){
-		fprintf(stderr, "server: failed to bind\n");
-		exit(1);	
 	}
 	
-
 	// server will be listening with maximum simultaneos connections of BACKLOG
 	if(listen(sockfd,BACKLOG) == -1){ 
 		perror("listen");
@@ -287,45 +280,65 @@ int server_creation(){
 	return sockfd;
 }
 
-//connection establishment with the client
-//return connection descriptor to the calling function
-int connection_accepting(int sockfd){
-	int connfd;
-	struct sockaddr_storage their_addr;
-	char s[INET6_ADDRSTRLEN];
-	socklen_t sin_size;
-	
-	sin_size = sizeof(their_addr); 
-	connfd=accept(sockfd,(SA*)&their_addr,&sin_size); 
-	if(connfd == -1){ 
-		perror("\naccept error\n");
-		return -1;
-	} 
-	//printing the client name
-	inet_ntop(their_addr.ss_family,get_in_addr((struct sockaddr *)&their_addr),s, sizeof(s));
-	
-	//block connections other than proxy
-	printf("%d\n", ntohs(get_in_port((struct sockaddr *)&their_addr)));
-	if(strcmp("127.0.0.1",s) != 0 || ntohs(get_in_port((struct sockaddr *)&their_addr)) != 8070){
-		close(connfd);
-		return -1;
-	}
-	printf("\nserver: got connection from %s\n", s);
-	
-	return connfd;
+void connection_accepting(int sockfd, struct pollfd **pollfds, int *maxfds, int *numfds, SSL*** sslfds, SSL_CTX* ctx) {
+    int connfd;
+    struct sockaddr_storage their_addr;
+    char s[INET6_ADDRSTRLEN];
+    socklen_t sin_size;
+
+    sin_size = sizeof(their_addr);
+    connfd = accept(sockfd, (SA*)&their_addr, &sin_size);
+    if (connfd == -1) {
+        perror("accept");
+        exit(1);
+    }
+
+    if (*numfds == *maxfds) {
+        *pollfds = realloc(*pollfds, (*maxfds + NUM_FDS) * sizeof(struct pollfd));
+        *sslfds = realloc(*sslfds, (*maxfds + NUM_FDS) * sizeof(SSL*));
+
+        if (*pollfds == NULL || *sslfds == NULL) {
+            perror("realloc");
+            exit(1);
+        }
+
+        *maxfds += NUM_FDS;
+    }
+    // Printing the client name
+    inet_ntop(their_addr.ss_family, get_in_addr((struct sockaddr *)&their_addr), s, sizeof(s));
+    
+    printf("%d\n", ntohs(get_in_port((struct sockaddr *)&their_addr)));
+    if(strcmp("::ffff:127.0.0.1",s) != 0 || ntohs(get_in_port((struct sockaddr *)&their_addr)) != 8070){
+	close(connfd);
+	return;
+    }
+    
+    
+    
+    (*numfds)++;
+
+    ((*pollfds) + *numfds - 1)->fd = connfd;
+    ((*pollfds) + *numfds - 1)->events = POLLIN;
+    ((*pollfds) + *numfds - 1)->revents = 0;
+
+    // Create a new SSL connection
+    SSL* ssl = SSL_new(ctx);
+    SSL_set_fd(ssl, connfd);
+
+    // Perform SSL handshake
+    if (SSL_accept(ssl) <= 0) {
+        ERR_print_errors_fp(stderr);
+        close(connfd);
+        exit(1);
+    }
+
+    // Store the SSL structure pointer in the array
+    (*sslfds)[*numfds - 1] = ssl;
+
+    
+    printf("\nserver: got connection from %s\n", s);
 }
 
-// reap all dead processes that are created as child processes
-void signal_handler(){
-	struct sigaction sa;
-	sa.sa_handler = sigchld_handler; 
-	sigemptyset(&sa.sa_mask);
-	sa.sa_flags = SA_RESTART;
-	if (sigaction(SIGCHLD, &sa, NULL) == -1) {
-		perror("sigaction");
-		exit(1);
-	}
-}
 
 // handled different methods
 void routing(char route[],char method[],SSL* ssl,char queryData[],char fileName[],char buff[],int query){
@@ -376,9 +389,9 @@ void routing(char route[],char method[],SSL* ssl,char queryData[],char fileName[
 
 
 //simple webserver with support to http methods such as get as well as post (basic functionalities)
-void simple_webserver(SSL* ssl,int connfd){
+void simple_webserver(SSL* ssl,struct pollfd* pollfds){
 	int c = 0;
-	char buff[2048];
+	char buff[1024];
 	char method[10];// to store the method name
 	// default route to be parsed
 	char fileName[100] = "output.txt";
@@ -387,13 +400,25 @@ void simple_webserver(SSL* ssl,int connfd){
 	int query = 0;// whether query parametes is requested or not
 
 	// receiving the message from the client either get request or post request
-	if((c = SSL_read(ssl, buff, sizeof(buff))) == -1){
-		printf("msg not received\n"); 
-		exit(0); 
-	}
+	c = SSL_read(ssl, buff, sizeof(buff));
+	if (c <= 0) {
+		if (c == 0) {
+		    // Connection closed by the client
+		    printf("Client closed connection\n");
+		    cleanup(ssl, pollfds);
+		    return;
+		} else {
+		    perror("SSL_read");
+		    cleanup(ssl, pollfds);
+		    exit(EXIT_FAILURE);
+		}
+	 }
+	 
 	buff[c] = '\0';
 
+	printf("%s",buff);
 	sscanf(buff, "%s /%s", method,route);
+		
 
 	// Different path other than default
 	if(strcmp(route,"HTTP/1.1")){
@@ -436,55 +461,63 @@ void simple_webserver(SSL* ssl,int connfd){
 
 int main(){ 
 	int sockfd,connfd;
+	nfds_t nfds = 0;
+	struct pollfd *pollfds;
+	int maxfds = 0;
+	int numfds = 0;
+	SSL** sslfds;
+	
 	//create SSL context
 	SSL_CTX* ctx = create_SSL_context();
  
 	
 	//server creation .
 	sockfd = server_creation();
+
+	if((pollfds = malloc(NUM_FDS*sizeof(struct pollfd))) == NULL){
+		perror("malloc");
+		exit(1);
+	}
+	if((sslfds = malloc(NUM_FDS*sizeof(SSL*))) == NULL){
+		perror("malloc");
+		exit(1);
+	}
+	maxfds = NUM_FDS;
 	
-	signal_handler();	
+	
+	pollfds -> fd = sockfd;
+	pollfds -> events = POLLIN;
+	pollfds -> revents = 0;
+	numfds = 1;
 
 	printf("server: waiting for connections...\n");
 	 
 	while(1){ 
 
-		connfd = connection_accepting(sockfd);
-			
-		if(connfd == -1){
-			continue;
+		nfds = numfds;
+		if(poll(pollfds,nfds,-1) == -1){
+			perror("poll");
+			exit(1);
 		}
-
-		// fork is used for concurrent server.
-		// here fork is used to create child process to handle single client connection because if two clients needs to 
-		// connect to the server simultaneously if we do the client acceptence without fork if some client got connected then until 
-		// the client releases the server no one can able to connect to the server.
-		// to avoid this , used fork, that creates child process to handle the connection.
-  
-		int fk=fork(); 
-		if (fk==0){ 
-			close(sockfd);
-			// Create an SSL connection
-			SSL* ssl = SSL_new(ctx);
-			SSL_set_fd(ssl, connfd);
-			 // Perform SSL handshake
-			if (SSL_accept(ssl) <= 0) {
-			    ERR_print_errors_fp(stderr);
-			    close(connfd);
-			    continue;
+		
+		for(int fd = 0; fd < nfds;fd++){
+			if((pollfds + fd)->fd <= 0)
+				continue;
+			
+			if(((pollfds + fd)->revents & POLLIN) == POLLIN){
+				if((pollfds + fd)->fd == sockfd){
+					connection_accepting(sockfd,&pollfds,&maxfds,&numfds,&sslfds,ctx);
+				}
+				else{
+					simple_webserver(sslfds[fd],pollfds+fd);
+				}
 			}
-			while(1){
-				simple_webserver(ssl,connfd);
-			}
-			close(connfd);
-			SSL_shutdown(ssl);
-        		SSL_free(ssl);
-        		exit(0);
-		} 
-		close(connfd);  
+		}
 	} 
 	SSL_CTX_free(ctx);
 	close(sockfd); 
 	return 0;
 } 
+
+
 
