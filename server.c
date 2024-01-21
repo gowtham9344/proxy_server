@@ -21,7 +21,7 @@
 #define SA struct sockaddr 
 #define BACKLOG 10 
 #define PORT "8050"
-#define NUM_FDS 2
+#define NUM_FDS 10
 
 int flag = 0;
 
@@ -307,11 +307,11 @@ void connection_accepting(int sockfd, struct pollfd **pollfds, int *maxfds, int 
     // Printing the client name
     inet_ntop(their_addr.ss_family, get_in_addr((struct sockaddr *)&their_addr), s, sizeof(s));
     
-    printf("%d\n", ntohs(get_in_port((struct sockaddr *)&their_addr)));
+    /*printf("%d\n", ntohs(get_in_port((struct sockaddr *)&their_addr)));
     if(strcmp("::ffff:127.0.0.1",s) != 0 || ntohs(get_in_port((struct sockaddr *)&their_addr)) != 8070){
 	close(connfd);
 	return;
-    }
+    }*/
     
     
     
@@ -404,7 +404,7 @@ void simple_webserver(SSL* ssl,struct pollfd* pollfds){
 	if (c <= 0) {
 		if (c == 0) {
 		    // Connection closed by the client
-		    printf("Client closed connection\n");
+		    printf("\nClient closed connection\n");
 		    cleanup(ssl, pollfds);
 		    return;
 		} else {
@@ -455,6 +455,8 @@ void simple_webserver(SSL* ssl,struct pollfd* pollfds){
 	}
 	
 	routing(route,method,ssl,queryData,fileName,buff,query);
+	cleanup(ssl,pollfds);
+	return;
 }
 
 
