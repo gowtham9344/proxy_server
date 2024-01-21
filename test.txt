@@ -1,5 +1,0 @@
-# curl_commands.txt
---proxy http://127.0.0.1:8080
---url http://127.0.0.1:8050/
--X GET
-
