@@ -225,18 +225,18 @@ void message_handler(SSL* ssl,SSL* destination_ssl,int client_socket,int destina
 	    // Forward the data between client and destination using SSL 
 	char data_buffer[2048];
 	ssize_t n;
-		n = SSL_read(ssl, data_buffer, sizeof(data_buffer));
+	n = SSL_read(ssl, data_buffer, sizeof(data_buffer));
 		
-		if (n <= 0) {
-		    return;
-		}
-		data_buffer[n]='\0';
-		SSL_write(destination_ssl, data_buffer, n);
-		
-		
-		while ((n = SSL_read(destination_ssl, data_buffer, sizeof(data_buffer))) > 0) {
-			SSL_write(ssl, data_buffer, n);
-		}
+	if (n <= 0) {
+	    return;
+	}
+	data_buffer[n]='\0';
+	SSL_write(destination_ssl, data_buffer, n);
+	
+	
+	while ((n = SSL_read(destination_ssl, data_buffer, sizeof(data_buffer))) > 0) {
+		SSL_write(ssl, data_buffer, n);
+	}
 
 }
 
@@ -274,56 +274,62 @@ void proxy_server_handler(int connfd){
     	
     	 if (strcmp(method, "CONNECT") == 0) {
 
- 		// Handling CONNECT method
-		char *port_str = strchr(host, ':');
-		if (port_str != NULL) {
-		    *port_str = '\0';
-		    char* port = port_str + 1;
-		    int destination_sockfd = client_creation(port,host);
-		    
-		    if(destination_sockfd == -1){
-		    	perror("socket");
-		        close(connfd);
-		        exit(EXIT_FAILURE);
-		    }
-		    
-		    
-		    
-		    // Notify the client that the connection is established
-		    const char *response = "HTTP/1.1 200 Connection established\r\n\r\n";
-		    int r = write(connfd, response, strlen(response));
-		    
-		    // Create an SSL connection object
-		    SSL *destination_ssl = SSL_new(ctx1);
-		    // Attach the SSL connection object to the socket file descriptor
-		    SSL_set_fd(destination_ssl, destination_sockfd);
-		    // Initiate SSL handshake
-		    if (SSL_connect(destination_ssl) == -1) {
-			ERR_print_errors_fp(stderr);
-			close(connfd);
-			exit(EXIT_FAILURE);
-		    }
-		    
-		   // Create an SSL connection
-		   SSL* ssl = SSL_new(ctx);
-		   SSL_set_fd(ssl, connfd);
-		   // Perform SSL handshake
-		   
-		   if (SSL_accept(ssl) <= 0) {
-			 ERR_print_errors_fp(stderr);
-			 cleanup(destination_ssl,connfd);
-			 close(destination_sockfd);
-			 return;
-		   }
-		 
-		    
-		    message_handler(ssl,destination_ssl,connfd,destination_sockfd);
-		    // Clean up
-		    SSL_free(destination_ssl);
-		    close(destination_sockfd);
-		    SSL_shutdown(ssl);
-        	    SSL_free(ssl);
-		}
+	    // Handling CONNECT method
+	    char* port_start = strchr(host, ':');
+	    char* port;
+	    char https_port[100] = "443";
+	    if (port_start != NULL) {
+	        *port_start = '\0';
+	        port = port_start + 1;
+	    }
+	    else{
+	    	port = https_port;
+	    }
+	    
+	    int destination_sockfd = client_creation(port,host);
+	    
+	    if(destination_sockfd == -1){
+	    	perror("socket");
+	        close(connfd);
+	        exit(EXIT_FAILURE);
+	    }
+	    
+	    
+	    
+	    // Notify the client that the connection is established
+	    const char *response = "HTTP/1.1 200 Connection established\r\n\r\n";
+	    int r = write(connfd, response, strlen(response));
+	    
+	    // Create an SSL connection object
+	    SSL *destination_ssl = SSL_new(ctx1);
+	    // Attach the SSL connection object to the socket file descriptor
+	    SSL_set_fd(destination_ssl, destination_sockfd);
+	    // Initiate SSL handshake
+	    if (SSL_connect(destination_ssl) == -1) {
+		ERR_print_errors_fp(stderr);
+		close(connfd);
+		exit(EXIT_FAILURE);
+	    }
+	    
+	   // Create an SSL connection
+	   SSL* ssl = SSL_new(ctx);
+	   SSL_set_fd(ssl, connfd);
+	   // Perform SSL handshake
+	   
+	   if (SSL_accept(ssl) <= 0) {
+		 ERR_print_errors_fp(stderr);
+		 cleanup(destination_ssl,connfd);
+		 close(destination_sockfd);
+		 return;
+	   }
+	 
+	    
+	    message_handler(ssl,destination_ssl,connfd,destination_sockfd);
+	    // Clean up
+	    SSL_free(destination_ssl);
+	    close(destination_sockfd);
+	    SSL_shutdown(ssl);
+	    SSL_free(ssl);
 	}
 	else{
 	
@@ -331,12 +337,23 @@ void proxy_server_handler(int connfd){
 	       char *host_start = strstr(buff, "Host: ") + 6;
 	       char *host_end = strstr(host_start, "\r\n");
 	       *host_end = '\0';  // Null-terminate to extract the host
+	       
+	        char* port;
+	        char https_port[100] = "80";
+	        char* port_start = strchr(host_start, ':');
+	    	if (port_start != NULL) {
+			*port_start = '\0';
+			port = port_start + 1;
+		}
+	    	else{
+	    		port = https_port;
+	 	}	
 
 	       // Print target server information
 	       printf("Target Host: %s\n", host_start);
 	       printf("Target URL: %s\n", host);
 	      
-	       int destination_sockfd = client_creation("80",host_start);
+	       int destination_sockfd = client_creation(port,host_start);
 	       
 	       if(destination_sockfd == -1){
 		    	perror("socket");
