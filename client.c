@@ -19,7 +19,7 @@
 #define PROXY_HOST "127.0.0.1" 
 #define PROXY_PORT "8080"   
 #define TARGET_HOST "127.0.0.1" 
-#define TARGET_PORT "8050"  
+#define TARGET_PORT "443"  
 
 // give IPV4 or IPV6  based on the family set in the sa
 void *get_in_addr(struct sockaddr *sa){

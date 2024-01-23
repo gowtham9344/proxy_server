@@ -20,7 +20,7 @@
 
 #define SA struct sockaddr 
 #define BACKLOG 10 
-#define PORT "8050"
+#define PORT "443"
 #define NUM_FDS 10
 
 int flag = 0;
