@@ -42,19 +42,19 @@ void create_SSL_context() {
     OpenSSL_add_all_algorithms();
     SSL_load_error_strings();
     // Create a new SSL context
-    ctx = SSL_CTX_new(SSLv23_server_method());
+    ctx = SSL_CTX_new(TLS_server_method());
     if (ctx == NULL) {
         ERR_print_errors_fp(stderr);
-        exit(EXIT_FAILURE);
+        exit(0);
     }
     // Load the server certificate and private key
     if (SSL_CTX_use_certificate_file(ctx, "server.crt", SSL_FILETYPE_PEM) <= 0) {
         ERR_print_errors_fp(stderr);
-        exit(EXIT_FAILURE);
+        exit(0);
     }
     if (SSL_CTX_use_PrivateKey_file(ctx, "server.key", SSL_FILETYPE_PEM) <= 0) {
         ERR_print_errors_fp(stderr);
-        exit(EXIT_FAILURE);
+        exit(0);
     }
 }
 void create_SSL_context_client() {
@@ -62,10 +62,10 @@ void create_SSL_context_client() {
     SSL_library_init();
     SSL_load_error_strings();
     // Create a new SSL context
-    ctx1 = SSL_CTX_new(SSLv23_client_method());
+    ctx1 = SSL_CTX_new(TLS_client_method());
     if (ctx1 == NULL) {
         ERR_print_errors_fp(stderr);
-        exit(EXIT_FAILURE);
+        exit(0);
     }
 }
 void cleanup(SSL *ssl, int client_socket) {
@@ -104,7 +104,7 @@ int server_creation(){
 		// minutes in that case before the socket is closed if we rerun the program then we have use the already used port 	
 		if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1){
 			perror("setsockopt");
-			exit(1);	
+			exit(0);	
 		}
 		
 		// it will help us to bind to the port.
@@ -117,13 +117,13 @@ int server_creation(){
 	}
 	if(p == NULL){
 		fprintf(stderr, "server: failed to bind\n");
-		exit(1);	
+		exit(0);	
 	}
 	
 	// server will be listening with maximum simultaneos connections of BACKLOG
 	if(listen(sockfd,BACKLOG) == -1){ 
 		perror("listen");
-		exit(1); 
+		exit(0); 
 	} 
 	return sockfd;
 }
@@ -155,7 +155,7 @@ void signal_handler(){
 	sa.sa_flags = SA_RESTART;
 	if (sigaction(SIGCHLD, &sa, NULL) == -1) {
 		perror("sigaction");
-		exit(1);
+		exit(0);
 	}
 }
 // this is the code for client creation. here i have used TCP instead of UDP because i need all the data without any loss. if we use UDP we
@@ -191,15 +191,8 @@ int client_creation(char* port,char* destination_server_addr){
 		
 		if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1){
 			perror("setsockopt");
-			exit(1);	
+			exit(0);	
 		}
-		
-		// it will help us to bind to the port.
-		/*if (bind(sockfd, (SA*) &proxy_addr,sizeof(proxy_addr) ) == -1) {
-			close(sockfd);
-			perror("server: bind");
-			continue;
-		}*/
 		
 		// connect will help us to connect to the server with the addr given in arguments.
 		if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
@@ -260,7 +253,7 @@ void proxy_server_handler(int connfd){
 	
 	if (c <= 0) {
 		close(connfd);
-		exit(EXIT_FAILURE);
+		exit(0);
     	}
     	
 	buff[c] = '\0';
@@ -291,7 +284,7 @@ void proxy_server_handler(int connfd){
 	    if(destination_sockfd == -1){
 	    	perror("socket");
 	        close(connfd);
-	        exit(EXIT_FAILURE);
+	        exit(0);
 	    }
 	    
 	    
@@ -308,7 +301,7 @@ void proxy_server_handler(int connfd){
 	    if (SSL_connect(destination_ssl) == -1) {
 		ERR_print_errors_fp(stderr);
 		close(connfd);
-		exit(EXIT_FAILURE);
+		exit(0);
 	    }
 	    
 	   // Create an SSL connection
@@ -325,7 +318,9 @@ void proxy_server_handler(int connfd){
 	 
 	    
 	    message_handler(ssl,destination_ssl,connfd,destination_sockfd);
+	    
 	    // Clean up
+	    SSL_shutdown(destination_ssl);
 	    SSL_free(destination_ssl);
 	    close(destination_sockfd);
 	    SSL_shutdown(ssl);
@@ -358,7 +353,7 @@ void proxy_server_handler(int connfd){
 	       if(destination_sockfd == -1){
 		    	perror("socket");
 		        close(connfd);
-		        exit(EXIT_FAILURE);
+		        exit(0);
 	       }
 	       
 	       message_handler_http(connfd,destination_sockfd,data);
@@ -381,7 +376,7 @@ int main(){
 		connfd = connection_accepting(sockfd);
 			
 		if(connfd == -1){
-			break;
+			continue;
 		}
 		// fork is used for concurrent server.
 		// here fork is used to create child process to handle single client connection because if two clients needs to 
@@ -400,5 +395,5 @@ int main(){
 	} 
 	SSL_CTX_free(ctx);
 	close(sockfd); 
-	return 0;
+	return 1;
 } 

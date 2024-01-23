@@ -37,7 +37,7 @@ SSL_CTX *create_SSL_context() {
     SSL_load_error_strings();
 
     // Create a new SSL context
-    ctx = SSL_CTX_new(SSLv23_client_method());
+    ctx = SSL_CTX_new(TLS_client_method());
     if (ctx == NULL) {
         ERR_print_errors_fp(stderr);
         exit(EXIT_FAILURE);

@@ -42,7 +42,7 @@ SSL_CTX* create_SSL_context() {
     SSL_load_error_strings();
 
     // Create a new SSL context
-    ctx = SSL_CTX_new(SSLv23_server_method());
+    ctx = SSL_CTX_new(TLS_server_method());
     if (ctx == NULL) {
         ERR_print_errors_fp(stderr);
         exit(EXIT_FAILURE);
@@ -67,8 +67,7 @@ void send_css(SSL* ssl,char fileName[100]){
 	 FILE *file = fopen(fileName, "r");
 	 // open css file
 	 if (file == NULL) {
-		perror("Error opening file");
-		send_response(ssl, "404 Not Found", "text/plain", "File Not Found");
+		send_response(ssl, "404 Not Found", "text/html", "File Not Found");
 		flag = 1;
 		return;
 	 }
@@ -95,8 +94,7 @@ void store_data(SSL* ssl,char content[1024],char fileName[100]){
 	    // Open a file for writing
 	    FILE *file = fopen(fileName, "a"); // Open in append mode to append new data
 	    if (file == NULL) {
-		perror("Error opening file");
-		send_response(ssl, "500 Internal Server Error", "text/plain", "Error opening file");
+		send_response(ssl, "500 Internal Server Error", "text/html", "Error opening file");
 		flag = 1;
 		return;
 	    }
@@ -113,8 +111,7 @@ void getalldata(SSL* ssl,char content[1024],char fileName[100]){
 	    // Open the file for reading
 	    FILE *file = fopen(fileName, "r");
 	    if (file == NULL) {
-		perror("Error opening file");
-		send_response(ssl, "500 Internal Server Error", "text/plain", "Error opening file");
+		send_response(ssl, "404 Not Found", "text/html", "File Not Found");
 		flag = 1;
 		return;
 	    }
@@ -138,6 +135,7 @@ void handle_get_request(SSL* ssl,char fileName[100]) {
 	
     // get all data from the specified file
     getalldata(ssl,buff,fileName); 
+    
     if(flag == 1)
 	return;
     
@@ -306,14 +304,7 @@ void connection_accepting(int sockfd, struct pollfd **pollfds, int *maxfds, int 
     }
     // Printing the client name
     inet_ntop(their_addr.ss_family, get_in_addr((struct sockaddr *)&their_addr), s, sizeof(s));
-    
-    /*printf("%d\n", ntohs(get_in_port((struct sockaddr *)&their_addr)));
-    if(strcmp("::ffff:127.0.0.1",s) != 0 || ntohs(get_in_port((struct sockaddr *)&their_addr)) != 8070){
-	close(connfd);
-	return;
-    }*/
-    
-    
+   
     
     (*numfds)++;
 
@@ -391,6 +382,7 @@ void routing(char route[],char method[],SSL* ssl,char queryData[],char fileName[
 //simple webserver with support to http methods such as get as well as post (basic functionalities)
 void simple_webserver(SSL* ssl,struct pollfd* pollfds){
 	int c = 0;
+	flag = 0;
 	char buff[1024];
 	char method[10];// to store the method name
 	// default route to be parsed
