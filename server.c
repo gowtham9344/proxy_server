@@ -22,6 +22,7 @@
 #define BACKLOG 10 
 #define PORT "443"
 #define NUM_FDS 10
+#define FILE_DIR "/var/www/html/"
 
 int flag = 0;
 
@@ -446,7 +447,10 @@ void simple_webserver(SSL* ssl,struct pollfd* pollfds){
 		}
 	}
 	
-	routing(route,method,ssl,queryData,fileName,buff,query);
+	char fileDirName[1000]=FILE_DIR;
+	strcat(fileDirName,fileName);
+	printf("The full path is %s\n",fileDirName);
+	routing(route,method,ssl,queryData,fileDirName,buff,query);
 	cleanup(ssl,pollfds);
 	return;
 }
