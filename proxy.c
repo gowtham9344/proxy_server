@@ -15,8 +15,6 @@
 #include <ctype.h>
 #include <time.h> 
 #include <poll.h>
-#include <openssl/ssl.h>
-#include <openssl/err.h>
 #define SA struct sockaddr 
 #define BACKLOG 10 
 #define PORT "8080"
