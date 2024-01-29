@@ -1,4 +1,5 @@
-/server.crt
-/server.key
-/server.csr
+/*.crt
+/*.key
+/*.csr
+/*.ext
 /*.out
