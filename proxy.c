@@ -14,15 +14,13 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <time.h> 
+#include <poll.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #define SA struct sockaddr 
 #define BACKLOG 10 
 #define PORT "8080"
 
-
-SSL_CTX* ctx;
-SSL_CTX* ctx1;
 //it helps us to handle all the dead process which was created with the fork system call.
 void sigchld_handler(int s){
 	int saved_errno = errno;
@@ -36,42 +34,7 @@ void *get_in_addr(struct sockaddr *sa){
 	}
 	return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
-void create_SSL_context() {
-    // Initialize OpenSSL
-    SSL_library_init();
-    OpenSSL_add_all_algorithms();
-    SSL_load_error_strings();
-    // Create a new SSL context
-    ctx = SSL_CTX_new(TLS_server_method());
-    if (ctx == NULL) {
-        ERR_print_errors_fp(stderr);
-        exit(0);
-    }
-    // Load the server certificate and private key
-    if (SSL_CTX_use_certificate_file(ctx, "server.crt", SSL_FILETYPE_PEM) <= 0) {
-        ERR_print_errors_fp(stderr);
-        exit(0);
-    }
-    if (SSL_CTX_use_PrivateKey_file(ctx, "server.key", SSL_FILETYPE_PEM) <= 0) {
-        ERR_print_errors_fp(stderr);
-        exit(0);
-    }
-}
-void create_SSL_context_client() {
-    // Initialize OpenSSL
-    SSL_library_init();
-    SSL_load_error_strings();
-    // Create a new SSL context
-    ctx1 = SSL_CTX_new(TLS_client_method());
-    if (ctx1 == NULL) {
-        ERR_print_errors_fp(stderr);
-        exit(0);
-    }
-}
-void cleanup(SSL *ssl, int client_socket) {
-    SSL_free(ssl);
-    close(client_socket);
-}
+
 // this is the code for server creation. here i have used TCP instead of UDP because i need all the data without any loss. if we use UDP we
 // have to implement those in the upper layers.
 // this function will return socket descripter to the calling function.
@@ -214,22 +177,46 @@ int client_creation(char* port,char* destination_server_addr){
 	
 	return sockfd;
 }
-void message_handler(SSL* ssl,SSL* destination_ssl,int client_socket,int destination_socket){
-	    // Forward the data between client and destination using SSL 
-	char data_buffer[2048];
-	ssize_t n;
-	n = SSL_read(ssl, data_buffer, sizeof(data_buffer));
+
+
+void message_handler(int client_socket,int destination_socket){
+	    // Forward the data between client and destination without encrypting the data 
+	
+	    struct pollfd pollfds[2];
+	    pollfds[0].fd = client_socket;
+	    pollfds[0].events = POLLIN;
+	    pollfds[0].revents = 0;
+	    pollfds[1].fd = destination_socket;
+	    pollfds[1].events = POLLIN;
+	    pollfds[1].revents = 0;
+	    char data_buffer[2048];
+	    ssize_t n;
+	    while(1){
+	    
+	    	if(poll(pollfds,2,-1) == -1){
+			perror("poll");
+			exit(1);
+		}
 		
-	if (n <= 0) {
-	    return;
-	}
-	data_buffer[n]='\0';
-	SSL_write(destination_ssl, data_buffer, n);
-	
-	
-	while ((n = SSL_read(destination_ssl, data_buffer, sizeof(data_buffer))) > 0) {
-		SSL_write(ssl, data_buffer, n);
-	}
+	    	for(int fd = 0; fd < 2;fd++){
+	    		if((pollfds[fd].revents & POLLIN) == POLLIN && fd == 0){
+	    			n = read(client_socket, data_buffer, sizeof(data_buffer));
+				if (n <= 0) {
+		    			return;
+				}
+				data_buffer[n]='\0';
+				n = write(destination_socket, data_buffer, n);
+	    		}
+	    		if((pollfds[fd].revents & POLLIN) == POLLIN && fd == 1){
+	    			n = read(destination_socket, data_buffer, sizeof(data_buffer));
+				if (n <= 0) {
+		    			return;
+				}
+				data_buffer[n]='\0';
+				n = write(client_socket, data_buffer, n);
+	    		}
+	   	}
+	   }
 
 }
 
@@ -244,6 +231,8 @@ void message_handler_http(int client_socket,int destination_socket,char data[]){
 		send(client_socket, data, n, 0);
 	}
 }
+
+
 //simple webserver with support to http methods such as get as well as post (basic functionalities)
 void proxy_server_handler(int connfd){
 	int c = 0;
@@ -292,39 +281,8 @@ void proxy_server_handler(int connfd){
 	    // Notify the client that the connection is established
 	    const char *response = "HTTP/1.1 200 Connection established\r\n\r\n";
 	    int r = write(connfd, response, strlen(response));
-	    
-	    // Create an SSL connection object
-	    SSL *destination_ssl = SSL_new(ctx1);
-	    // Attach the SSL connection object to the socket file descriptor
-	    SSL_set_fd(destination_ssl, destination_sockfd);
-	    // Initiate SSL handshake
-	    if (SSL_connect(destination_ssl) == -1) {
-		ERR_print_errors_fp(stderr);
-		close(connfd);
-		exit(0);
-	    }
-	    
-	   // Create an SSL connection
-	   SSL* ssl = SSL_new(ctx);
-	   SSL_set_fd(ssl, connfd);
-	   // Perform SSL handshake
 	   
-	   if (SSL_accept(ssl) <= 0) {
-		 ERR_print_errors_fp(stderr);
-		 cleanup(destination_ssl,connfd);
-		 close(destination_sockfd);
-		 return;
-	   }
-	 
-	    
-	    message_handler(ssl,destination_ssl,connfd,destination_sockfd);
-	    
-	    // Clean up
-	    SSL_shutdown(destination_ssl);
-	    SSL_free(destination_ssl);
-	    close(destination_sockfd);
-	    SSL_shutdown(ssl);
-	    SSL_free(ssl);
+	    message_handler(connfd,destination_sockfd);
 	}
 	else{
 	
@@ -360,11 +318,9 @@ void proxy_server_handler(int connfd){
 	       close(destination_sockfd);
 	}
 }
+
 int main(){ 
 	int sockfd,connfd;
-	//create SSL context
-	create_SSL_context();
- 	create_SSL_context_client();
 	
 	//server creation .
 	sockfd = server_creation();
@@ -393,7 +349,7 @@ int main(){
 		} 
 		close(connfd);  
 	} 
-	SSL_CTX_free(ctx);
+	
 	close(sockfd); 
 	return 1;
 } 
